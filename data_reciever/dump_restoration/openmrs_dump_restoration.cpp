@@ -49,8 +49,30 @@ void restoreMySQLDump(const std::string& filename, const std::string& db_host, c
     conn = mysql_init(NULL);
 
     // Connect to MySQL
+    if (!mysql_real_connect(conn, db_host.c_str(), db_user.c_str(), db_password.c_str(), NULL, 0, NULL, 0)) {
+        std::cerr << "Failed to connect to MySQL server: " << mysql_error(conn) << std::endl;
+        return;
+    }
+
+    // Check if the database exists
+    if (mysql_select_db(conn, db_name.c_str()) != 0) {
+        // Database does not exist, create it
+        if (mysql_query(conn, ("CREATE DATABASE " + db_name).c_str()) != 0) {
+            std::cerr << "Failed to create database: " << mysql_error(conn) << std::endl;
+            mysql_close(conn);
+            return;
+        } else {
+            std::cout << "Database created: " << db_name << std::endl;
+        }
+    }
+
+    // Close the connection
+    mysql_close(conn);
+
+    // Reconnect to the MySQL server and connect to the database
+    conn = mysql_init(NULL);
     if (!mysql_real_connect(conn, db_host.c_str(), db_user.c_str(), db_password.c_str(), db_name.c_str(), 0, NULL, 0)) {
-        std::cerr << "Failed to connect to database: " << mysql_error(conn) << std::endl;
+        std::cerr << "Failed to connect to MySQL server: " << mysql_error(conn) << std::endl;
         return;
     }
 
