@@ -43,6 +43,31 @@ void loadEnvironmentFromFile(const std::string& filename) {
     }
 }
 
+// this replaces the site name spaces with underscores
+std::string  replaceSpacesWithUnderscores(std::string& str) {
+    std::string modifiedStr = str;
+    size_t spaceCount = 0;
+    for (char c : modifiedStr) {
+        if (c == ' ') {
+            spaceCount++;
+        }
+    }
+
+    if (spaceCount > 0) {
+        size_t newLength = modifiedStr.length() + spaceCount;
+        modifiedStr.resize(newLength);
+
+        for (size_t i = 0; i < modifiedStr.length(); ++i) {
+            if (modifiedStr[i] == ' ') {
+                modifiedStr[i] = '_';
+            }
+        }
+    }
+
+    return modifiedStr;
+
+}
+
 // Function to restore MySQL dump file
 void restoreMySQLDump(const std::string& filename, const std::string& db_host, const std::string& db_user, const std::string& db_password, const std::string& db_name, const std::string& instance_name) {
     MYSQL *conn;
@@ -122,7 +147,8 @@ void processDumpFile(const std::string& filename, const std::string& db_host, co
 
     // If siteid and sitename are found, restore the dump file
     if (!siteid.empty() && !sitename.empty()) {
-        std::string instance_name = sitename + "_" + siteid;
+        std::string new_sitename = replaceSpacesWithUnderscores(sitename);
+        std::string instance_name = new_sitename + "_" + siteid;
         restoreMySQLDump(filename, db_host, db_user, db_password, db_name, instance_name);
     } else {
         std::cerr << "Siteid and sitename not found in " << filename << std::endl;
