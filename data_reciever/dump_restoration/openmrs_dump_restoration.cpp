@@ -1,48 +1,29 @@
 #include <iostream>
 #include <fstream>
-#include <cstdlib>
-#include <vector>
+#include <sstream>
 #include <string>
-#include <thread>
-#include <regex>
-#include <filesystem>
 #include <zlib.h>
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <filesystem>
 #include <cstdlib>
 #include <unordered_map>
 #include <chrono>
+#include <algorithm>
+
 
 // MySQL C API headers
 #include <mysql/mysql.h>
 
+
+using namespace std;
 namespace fs = std::filesystem;
 
+const int BUFFER_SIZE = 1024 * 1024; // 1 MB buffer size
+const int MAX_THREADS = 4;             // Maximum number of threads
 
-// Function to load environment variables from a file
-void loadEnvironmentFromFile(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Failed to open environment file: " << filename << std::endl;
-        return;
-    }
-
-    std::unordered_map<std::string, std::string> envVariables;
-    std::string line;
-    while (std::getline(file, line)) {
-        size_t pos = line.find('=');
-        if (pos != std::string::npos) {
-            std::string key = line.substr(0, pos);
-            std::string value = line.substr(pos + 1);
-            envVariables[key] = value;
-        }
-    }
-
-    file.close();
-
-    // Set environment variables
-    for (const auto& [key, value] : envVariables) {
-        setenv(key.c_str(), value.c_str(), 1); // Overwrite existing variable if it exists
-    }
-}
+atomic<bool> searchComplete(false); // Atomic flag to indicate search completion
 
 // this replaces the site name spaces with underscores
 std::string replaceSpacesWithUnderscores(std::string& str) {
@@ -77,27 +58,57 @@ void removeSubstring(std::string& word, const std::string substring) {
     }
 }
 
-// Function to extract a word between specified characters
-std::string extractWord(const std::string& input, char startChar, char endChar, char startCombinator,  char endCombinator) {
-    std::string word = "";
-    bool insideWord = false;
+std::vector<std::string> splitString(const std::string& input, char delimiter) {
+    std::istringstream ss(input);
+    std::string token;
+    std::vector<std::string> tokens;
 
-    for (int i = 2; i < input.length(); ++i) {
-        if (input[i] == startChar && input[i+1] == startCombinator) {
-            insideWord = true;
-        } else if (input[i] == endChar && input[i+1] == endCombinator) {
-            insideWord = false;
-            break; // Exit loop once endChar is found
-        } else if (insideWord == true && input[i] != startChar && input[i] != endChar ) {
-            word += input[i];
+    while (std::getline(ss, token, delimiter)) {
+        tokens.push_back(token);
+    }
+
+    // If there are at least two tokens
+    if (tokens.size() >= 2) {
+        // Remove single quotes from the second token
+        size_t pos = tokens[1].find('\'');
+        while (pos != std::string::npos) {
+            tokens[1].erase(pos, 1);
+            pos = tokens[1].find('\'', pos);
         }
     }
 
-    return word;
+    return tokens;
+}
+
+// Function to load environment variables from a file
+void loadEnvironmentFromFile(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open environment file: " << filename << std::endl;
+        return;
+    }
+
+    std::unordered_map<std::string, std::string> envVariables;
+    std::string line;
+    while (std::getline(file, line)) {
+        size_t pos = line.find('=');
+        if (pos != std::string::npos) {
+            std::string key = line.substr(0, pos);
+            std::string value = line.substr(pos + 1);
+            envVariables[key] = value;
+        }
+    }
+
+    file.close();
+
+    // Set environment variables
+    for (const auto& [key, value] : envVariables) {
+        setenv(key.c_str(), value.c_str(), 1); // Overwrite existing variable if it exists
+    }
 }
 
 // Function to restore MySQL dump file
-void restoreMySQLDump(const std::string& filename, const std::string& db_host, const std::string& db_user, const std::string& db_password, const std::string& db_name, const std::string& instance_name) {
+void restoreMySQLDump(const std::string& filename, const std::string& db_host, const std::string& db_user, const std::string& db_password, const std::string& db_name) {
     MYSQL *conn;
     conn = mysql_init(NULL);
 
@@ -141,168 +152,144 @@ void restoreMySQLDump(const std::string& filename, const std::string& db_host, c
     mysql_close(conn);
 }
 
-// Function to search for text in a compressed file
-void searchInCompressedFile(const std::string& filename, const std::string& searchText1, const std::string& searchText2, const std::string& removeText,const std::string& db_host, const std::string& db_user, const std::string& db_password, const std::string& db_name) {
-    gzFile file = gzopen(filename.c_str(), "rb");
-    if (!file) {
-        std::cerr << "Error opening file: " << filename << std::endl;
-        return;
-    }
-
-    const size_t bufferSize = 8192 * 4;
-    char buffer[bufferSize];
-
-    size_t searchText1Length = searchText1.length();
-    size_t searchText2Length = searchText2.length();
-
-    std::string partialMatchBuffer1;
-    std::string partialMatchBuffer2;
-
-    int bytesRead;
-    while ((bytesRead = gzread(file, buffer, bufferSize)) > 0) {
-        
-        for (int i = 0; i < bytesRead; ++i) {
-            partialMatchBuffer1 += buffer[i];
-            partialMatchBuffer2 += buffer[i];
-
-            if (partialMatchBuffer1.length() > searchText1Length) {
-                partialMatchBuffer1.erase(0, partialMatchBuffer1.length() - searchText1Length);
-            }
-
-            if (partialMatchBuffer2.length() > searchText2Length) {
-                partialMatchBuffer2.erase(0, partialMatchBuffer2.length() - searchText2Length);
-            }
 
 
-            std::string new_sitename;
-
-            if (partialMatchBuffer1 == searchText1) {
-                std::string line;
-                int charsToShow = searchText1Length + 20;
-                std::string chaline;
-                for (int j = 0; j < charsToShow; ++j) {
-                    if (i + j < bytesRead) {
-                        chaline += buffer[i + j];
-                    } else {
-                        if ((bytesRead = gzread(file, buffer, bufferSize)) > 0) {
-                            i = -1; // Reset index to begin from the start of the new buffer
-                        } else {
-                            break; // End of file
-                        }
-                    }
-                }
-
-                char startChar = ',';
-                char endChar = '\'';
-                char startCombinator = '\'';
-                char endCombinator = ',';
-
-                std::string word = extractWord(chaline, startChar, endChar, startCombinator, endCombinator);
-
-                if (!word.empty()) {
-                    removeSubstring(word, removeText);
-                    new_sitename = replaceSpacesWithUnderscores(word);
-                    //std::string instance_name = new_sitename + "_";
-                    //std::cout << "instance_name:" << instance_name << std::endl;
-                } else {
-                    std::cout << "sitename not found:" << std::endl;
-                }
-            }
-
-            if (partialMatchBuffer2 == searchText2) {
-                std::string lineb;
-                int charsToShowb = searchText2Length + 20;
-                std::string chalineb;
-                for (int j = 0; j < charsToShowb; ++j) {
-                    if (i + j < bytesRead) {
-                        chalineb += buffer[i + j];
-                    } else {
-                        if ((bytesRead = gzread(file, buffer, bufferSize)) > 0) {
-                            i = -1; // Reset index to begin from the start of the new buffer
-                        } else {
-                            break; // End of file
-                        }
-                    }
-                }
-
-                char startChar = ',';
-                char endChar = '\'';
-                char startCombinator = '\'';
-                char endCombinator = ',';
-
-                std::string wordb = extractWord(chalineb, startChar, endChar, startCombinator, endCombinator);
-
-                if (!wordb.empty()) {
-                    std::string instance_id = wordb;
-                    std::string instance_name = new_sitename + "_" + instance_id;
-                    std::cout << "instance_name:" << instance_name << std::endl;
-                    restoreMySQLDump(filename, db_host, db_user, db_password, db_name, instance_name);
-                    return;
-                } else {
-                    std::cout << "Word not found:" << std::endl;
-                }
-            }
-        }
-        
-    }
-
-    //std::cout<<"check last line--"<<std::endl;
-
-    gzclose(file);
-}
-
-// Function to process a dump file
-void processDumpFile(const std::string& filename, const std::string& db_host, const std::string& db_user, const std::string& db_password, const std::string& db_name) {
-    std::string searchText1 = "current_health_center_name";
-    std::string searchText2 = "current_health_center_id";
+void searchInBuffer(const string &searchString1, const string &searchString2, const char *buffer, size_t bytesRead,const std::string &gzFileName)
+{
     std::string removeText = "name\\n";
-    std::cout << "filename:" << filename.c_str() << std::endl;
-    auto start = std::chrono::steady_clock::now();
-    searchInCompressedFile(filename, searchText1, searchText2, removeText,db_host, db_user, db_password, db_name);
-    auto end = std::chrono::steady_clock::now();
-    // Calculate the duration
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    // Display the duration in milliseconds
-    std::cout << "Time taken: " << duration.count() << " milliseconds" << std::endl;
-}
-
-int main() {
-    // Load environment variables from the file
-    loadEnvironmentFromFile("env.txt");
-
+    // Search for the search strings in the buffer
+    const char *pos = buffer;
+    bool found1 = false, found2 = false;
+    std::string new_sitename;
+    char startChar = ',';
+    char endChar = '\'';
+    char startCombinator = '\'';
+    char endCombinator = ',';
     // Retrieve database connection parameters from environment variables
     std::string db_host = std::getenv("DB_HOST");
     std::string db_user = std::getenv("DB_USER");
     std::string db_password = std::getenv("DB_PASSWORD");
-    std::string db_name = std::getenv("DB_NAME");
 
-    // Path to the folder containing dump files
-    std::string dump_folder = std::getenv("DUMP_FOLDER");
+    while ((pos = strstr(pos, searchString1.c_str())) != NULL)
+    {
+        found1 = true;
+        std::string chaline = string(pos, min(static_cast<size_t>(60), bytesRead - (pos - buffer)));
+        char delimiter = ',';
+        std::vector<std::string> tokens = splitString(chaline, delimiter);
+        std::string word = "";
+        if (tokens.size() > 1) {
+            word = tokens[1];
 
-    // Vector to hold thread objects
-    std::vector<std::thread> threads;
+        }
+        //std::string word = extractWord(chaline, startChar, endChar, startCombinator, endCombinator);
+        removeSubstring(word, removeText);
+        // Convert each character in the string to lowercase
+        std::transform(word.begin(), word.end(), word.begin(),
+                       [](unsigned char c){ return std::tolower(c); });
+        new_sitename = replaceSpacesWithUnderscores(word);
+        //std::cout<<"sitename:"<<chaline<<std::endl;
+        //cout << "Found match for search string 1: " << string(pos, min(static_cast<size_t>(60), bytesRead - (pos - buffer))) << endl;
+        pos += searchString1.size();
+    }
 
-    // Iterate over files in the dump folder
-    for (const auto& entry : fs::directory_iterator(dump_folder)) {
-        std::string filename = entry.path().string();
+    pos = buffer;
+    while ((pos = strstr(pos, searchString2.c_str())) != NULL)
+    {
+        found2 = true;
+        std::string chalineb = string(pos, min(static_cast<size_t>(60), bytesRead - (pos - buffer)));
+        char delimiterb = ',';
+        std::vector<std::string> tokensb = splitString(chalineb, delimiterb);
+        std::string instance_id = "";
+        if (tokensb.size() > 1) {
+            instance_id = tokensb[1];
 
-        // Process only .gz files
-        if (filename.find(".gz") != std::string::npos) {
-            // Start a new thread to process the dump file
-           
-            threads.push_back(std::thread(processDumpFile, filename, db_host, db_user, db_password, db_name));
-            
+        }
 
+
+
+        //std::cout<<"siteid:"<<chalineb<<std::endl;
+        //std::string instance_id = extractWord(chalineb, startChar, endChar, startCombinator, endCombinator);
+        if(new_sitename != "")
+        {
+            std::string db_name = new_sitename + "_" + instance_id;
+            std::cout << "instance_name:" << db_name << std::endl;
+            restoreMySQLDump(gzFileName, db_host, db_user, db_password, db_name);
+        }
+        //cout << "Found match for search string 2: " << string(pos, min(static_cast<size_t>(60), bytesRead - (pos - buffer))) << endl;
+        pos += searchString2.size();
+        chalineb = "";
+    }
+
+    // Set search complete flag to true if both match is found
+    if (found1 && found2)
+        searchComplete = true;
+}
+
+void searchInGzipFile(const string &gzFileName, const string &searchString1, const string &searchString2)
+{
+    gzFile file = gzopen(gzFileName.c_str(), "rb");
+    if (!file)
+    {
+        cerr << "Error: Could not open file " << gzFileName << endl;
+        return;
+    }
+
+    vector<thread> threads;
+
+    char buffer[BUFFER_SIZE];
+    while (!searchComplete)
+    {
+        int bytesRead = gzread(file, buffer, BUFFER_SIZE - 1);
+        if (bytesRead <= 0)
+        {
+            break; // End of file or error
+        }
+
+        // Launch a thread to search in the current buffer
+        threads.emplace_back(searchInBuffer, ref(searchString1), ref(searchString2), buffer, static_cast<size_t>(bytesRead),gzFileName);
+
+        // Ensure we don't have too many threads active
+        if (threads.size() >= MAX_THREADS)
+        {
+            for (auto &t : threads)
+            {
+                t.join();
+            }
+            threads.clear();
         }
     }
 
-    // Join all threads
-    for (auto& t : threads) {
+    // Join remaining threads
+    for (auto &t : threads)
+    {
         t.join();
     }
 
-    std::cout << "All dump files processed successfully!" << std::endl;
+    gzclose(file);
+}
+
+void searchInFolder(const string &folderPath, const string &searchString1, const string &searchString2)
+{
+    for (const auto &entry : fs::directory_iterator(folderPath))
+    {
+        if (entry.is_regular_file() && entry.path().extension() == ".gz")
+        {
+            cout << "Searching in file: " << entry.path() << endl;
+            searchComplete = false;
+            searchInGzipFile(entry.path(), searchString1, searchString2);
+        }
+    }
+}
+
+int main()
+{
+    loadEnvironmentFromFile("env.txt");
+    // Path to the folder containing dump files
+    const string folderPath = std::getenv("DUMP_FOLDER");
+    const string searchString1 = std::getenv("SITENAME");
+    const string searchString2 = std::getenv("SITEID");
+
+    searchInFolder(folderPath, searchString1, searchString2);
 
     return 0;
 }
-
