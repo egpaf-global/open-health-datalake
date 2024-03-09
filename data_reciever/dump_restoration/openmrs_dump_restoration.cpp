@@ -23,6 +23,13 @@ namespace fs = std::filesystem;
 const int BUFFER_SIZE = 1024 * 1024; // 1 MB buffer size
 const int MAX_THREADS = 4;             // Maximum number of threads
 
+// Data structure to store table creation statements
+struct TableDefinition {
+    std::string tableName;
+    std::string createStatement;
+};
+
+
 atomic<bool> searchComplete(false); // Atomic flag to indicate search completion
 
 // this replaces the site name spaces with underscores
@@ -107,13 +114,109 @@ void loadEnvironmentFromFile(const std::string& filename) {
     }
 }
 
+// Function to check if a table exists
+bool tableExists(MYSQL* conn, const std::string& tableName) {
+    std::string query = "SHOW TABLES LIKE '" + tableName + "'";
+    if (mysql_query(conn, query.c_str()) != 0) {
+        std::cerr << "Error checking table existence: " << mysql_error(conn) << std::endl;
+        return false;
+    }
+
+    MYSQL_RES* result = mysql_store_result(conn);
+    if (!result) {
+        std::cerr << "Error storing result: " << mysql_error(conn) << std::endl;
+        return false;
+    }
+
+    bool exists = mysql_num_rows(result) > 0;
+
+    mysql_free_result(result);
+
+    return exists;
+}
+
+// Function to check if a column exists in a table
+bool columnExists(MYSQL* conn, const std::string& tableName, const std::string& columnName) {
+    std::string query = "SHOW COLUMNS FROM " + tableName + " LIKE '" + columnName + "'";
+    if (mysql_query(conn, query.c_str()) != 0) {
+        std::cerr << "Error checking column existence: " << mysql_error(conn) << std::endl;
+        return false;
+    }
+
+    MYSQL_RES* result = mysql_store_result(conn);
+    if (!result) {
+        std::cerr << "Error storing result: " << mysql_error(conn) << std::endl;
+        return false;
+    }
+
+    bool exists = mysql_num_rows(result) > 0;
+
+    mysql_free_result(result);
+
+    return exists;
+}
+
+// Helper function to extract the column name from the CREATE TABLE statement
+std::string extractColumnName(const std::string& createStatement) {
+    // Assuming the column name is enclosed within backticks (`column_name`)
+    size_t startPos = createStatement.find("`") + 1; // Find the start position of the column name
+    size_t endPos = createStatement.find("`", startPos); // Find the end position of the column name
+    if (startPos != std::string::npos && endPos != std::string::npos) {
+        return createStatement.substr(startPos, endPos - startPos);
+    }
+    return ""; // Return an empty string if the column name couldn't be extracted
+}
+
+// Function to check if a table references another table
+bool tableReferences(const TableDefinition& table, const TableDefinition& referencedTable) {
+    // Extract the table names from the CREATE TABLE statements
+    std::string tableName = table.tableName;
+    std::string referencedTableName = referencedTable.tableName;
+
+    // Extract foreign key constraints from the CREATE TABLE statement
+    std::string createStatement = table.createStatement;
+
+    // Check if the create statement contains a foreign key constraint referencing the referenced table
+    std::string searchString = "FOREIGN KEY";
+    size_t pos = createStatement.find(searchString);
+    while (pos != std::string::npos) {
+        // Look for the referenced table name within the foreign key constraint
+        size_t referencedTablePos = createStatement.find(referencedTableName, pos);
+        if (referencedTablePos != std::string::npos) {
+            // Found a foreign key constraint referencing the referenced table
+            return true;
+        }
+        // Continue searching for more foreign key constraints
+        pos = createStatement.find(searchString, pos + 1);
+    }
+
+    // No foreign key constraints found referencing the referenced table
+    return false;
+}
+
+
+
+// Function to create a table in the database
+void createTable(MYSQL* conn, const std::string& createStatement) {
+    // Execute the CREATE TABLE statement
+    if (mysql_query(conn, createStatement.c_str()) != 0) {
+        std::cerr << "Failed to create table: " << mysql_error(conn) << std::endl;
+        return;
+    }
+    std::cout << "Table created successfully." << std::endl;
+}
+
+
 // Function to restore MySQL dump file
 void restoreMySQLDump(const std::string& filename, const std::string& db_host, const std::string& db_user, const std::string& db_password, const std::string& db_name) {
     MYSQL *conn;
     conn = mysql_init(NULL);
 
-    // Connect to MySQL
-    if (!mysql_real_connect(conn, db_host.c_str(), db_user.c_str(), db_password.c_str(), NULL, 0, NULL, 0)) {
+    std::unordered_map<std::string, bool> createdTables;
+
+    std::string db_hostb = "0.0.0.0";
+    unsigned int port = 3900;
+    if (!mysql_real_connect(conn, db_hostb.c_str(), db_user.c_str(), db_password.c_str(), NULL, port, NULL, 0)) {
         std::cerr << "Failed to connect to MySQL server: " << mysql_error(conn) << std::endl;
         return;
     }
@@ -135,17 +238,242 @@ void restoreMySQLDump(const std::string& filename, const std::string& db_host, c
 
     // Reconnect to the MySQL server and connect to the database
     conn = mysql_init(NULL);
-    if (!mysql_real_connect(conn, db_host.c_str(), db_user.c_str(), db_password.c_str(), db_name.c_str(), 0, NULL, 0)) {
+    if (!mysql_real_connect(conn, db_host.c_str(), db_user.c_str(), db_password.c_str(), db_name.c_str(), port, NULL, 0)) {
         std::cerr << "Failed to connect to MySQL server: " << mysql_error(conn) << std::endl;
         return;
     }
 
-    // Execute MySQL restore command
-    std::string command = "mysql -h" + db_host + " -u" + db_user + " -p" + db_password + " " + db_name + " < " + filename;
-    int status = std::system(command.c_str());
+    // Open the compressed SQL dump file
+    gzFile file = gzopen(filename.c_str(), "rb");
+    if (!file) {
+        std::cerr << "Failed to open file: " << filename << std::endl;
+        mysql_close(conn);
+        return;
+    }
 
-    if (status != 0) {
-        std::cerr << "Failed to restore " << filename << std::endl;
+    std::string line;
+    std::string query;
+    std::string drop_query;
+    std::string set_query;
+    char buffer[4096]; // Buffer to store decompressed data (4KB)
+    int bytesRead;
+    bool semicolonFound = false;
+    bool inComment = false;
+    std::vector<TableDefinition> tables;
+    bool insideCreateTable = false;
+    bool insideDropTable = false;
+    bool insideSetTable = false;
+    bool insideConstraintFound = false;
+
+    // Read from the compressed file
+    while ((bytesRead = gzread(file, buffer, sizeof(buffer))) > 0) {
+        std::stringstream ss(std::string(buffer, buffer + bytesRead));
+        while (std::getline(ss, line)) {
+            // Skip empty lines and comments
+            if (line.empty())
+                continue;
+
+            // Handle multiline comments
+            if (!inComment && line.find("/*") != std::string::npos) {
+                inComment = true;
+            }
+
+            if (inComment) {
+                // Check if the line contains the end of the comment
+                size_t endCommentPos = line.find("*/");
+                if (endCommentPos != std::string::npos) {
+                    line.erase(0, endCommentPos + 2); // Erase everything before the end of the comment
+                    inComment = false;
+                } else {
+                    continue; // Skip the entire line if still inside a comment
+                }
+            } else if (line[0] == '#' || line.substr(0, 2) == "--") {
+                continue; // Skip comment lines
+            }
+
+
+            // adding logic to check multiline Queries
+
+            // Check if the line contains a CREATE TABLE statement
+
+            if (line.find("CREATE TABLE") != std::string::npos) {
+                insideCreateTable = true;
+                //query += line;
+                //query = line; // Start capturing the CREATE TABLE statement
+            }
+
+            if (line.find("DROP TABLE") != std::string::npos) {
+                insideDropTable = true;
+                //drop_query += line;
+                //query = line; // Start capturing the CREATE TABLE statement
+            }
+
+            if (line.find("SET ") != std::string::npos) {
+                insideSetTable = true;
+                //set_query += line;
+                //query = line; // Start capturing the CREATE TABLE statement
+            }
+
+            if (insideDropTable) {
+                drop_query += line;
+
+
+            }
+            if (insideSetTable) {
+                set_query += line;
+
+            }
+
+
+
+            // Append the line to the query if inside a CREATE TABLE statement
+            if (insideCreateTable) {
+                
+                query += line;
+                // Check if the line contains a CONSTRAINT definition
+                if (line.find("CONSTRAINT") != std::string::npos) {
+                    // You can push this to the tables vector
+                    //tables.push_back({line, query});
+
+                    insideConstraintFound = true;
+                }
+
+                // Check if the line ends the CREATE TABLE statement
+                if (line.find(")") != std::string::npos) {
+                    if(insideConstraintFound){
+                        tables.push_back({line, query});
+                        insideCreateTable = false;
+                        insideConstraintFound = false;
+                        query.clear();
+                        continue;
+                    }
+                    
+                }
+            }
+
+
+            /*// Check if the line contains a CREATE TABLE statement with CONSTRAINT
+            if (line.find("CREATE TABLE") != std::string::npos && line.find("CONSTRAINT") != std::string::npos) {
+                // Store the table definition
+                std::cout<<"see if it passes this stage:"<<line<<endl;
+                tables.push_back({line, query});
+                continue;
+            }
+            else{
+                std::cout<<"Else::::"<<line<<endl;
+            }*/
+
+
+            // end
+
+            //query += line;
+
+            // Execute query if it ends with a semicolon
+            if (line.back() == ';') {
+                insideDropTable = false;
+                insideSetTable = false;
+                if(query.length() > 1)
+                {
+                    std::cout<<"check semicolonFound:"<<line.back()<<std::endl;
+                    std::cout<<"check before run:"<<query<<std::endl;
+                    semicolonFound = true;
+
+                    
+                    
+                    //std::cout<<"query::"<<query<<std::endl;
+
+                    if (mysql_query(conn, query.c_str()) != 0) {
+                        std::cerr << "Failed to execute query: " << mysql_error(conn) << std::endl;
+                        mysql_close(conn);
+                        gzclose(file);
+                        return;
+                    }
+                }
+                query.clear();
+
+                //drop query
+                if(drop_query.length() > 1)
+                {
+                    std::cout<<"check before drop_query run:"<<drop_query<<std::endl;
+                    //semicolonFound = true;
+
+                    
+                    
+                    //std::cout<<"query::"<<query<<std::endl;
+
+                    if (mysql_query(conn, drop_query.c_str()) != 0) {
+                        std::cerr << "Failed to execute drop_query: " << mysql_error(conn) << std::endl;
+                        mysql_close(conn);
+                        gzclose(file);
+                        return;
+                    }
+                }
+                drop_query.clear();
+
+                //set query
+                if(set_query.length() > 1)
+                {
+                    std::cout<<"check before set_query run:"<<set_query<<std::endl;
+                    //semicolonFound = true;
+
+                    
+                    
+                    //std::cout<<"query::"<<query<<std::endl;
+
+                    if (mysql_query(conn, set_query.c_str()) != 0) {
+                        std::cerr << "Failed to execute set_query: " << mysql_error(conn) << std::endl;
+                        mysql_close(conn);
+                        gzclose(file);
+                        return;
+                    }
+                }
+                set_query.clear();
+
+            }
+        }
+    }
+
+
+    // Add logic to check and create tables with constraints
+    for (const auto& table : tables) {
+        // Get the column name dynamically from the CREATE TABLE statement
+        std::string columnName = extractColumnName(table.createStatement);
+
+        // Check if the referenced table and column exist
+        if (!tableExists(conn, table.tableName) || !columnExists(conn, table.tableName, columnName)) {
+            // Search for the definition of the referenced table in the remaining SQL file
+            bool found = false;
+            for (const auto& otherTable : tables) {
+                if (tableReferences(otherTable, table)) {
+                    // Create the referenced table first
+                    if (!createdTables[otherTable.tableName]) {
+                        createTable(conn,otherTable.createStatement);
+                        createdTables[otherTable.tableName] = true;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found) {
+                std::cerr << "Error: Referenced table not found: " << table.tableName << std::endl;
+                continue;
+            }
+        }
+
+        // Create the table with constraints
+        createTable(conn,table.createStatement);
+        createdTables[table.tableName] = true;
+    }
+
+    tables.clear(); // Clear tables vector after processing
+
+    gzclose(file);
+
+    if (!semicolonFound && !query.empty()) {
+        std::cerr << "Error: Incomplete query found in the SQL file." << std::endl;
+        mysql_close(conn);
+        return;
     }
 
     // Close MySQL connection
@@ -202,10 +530,7 @@ void searchInBuffer(const string &searchString1, const string &searchString2, co
         std::string instance_id = "";
         if (tokensb.size() > 1) {
             instance_id = tokensb[1];
-
         }
-
-
 
         //std::cout<<"siteid:"<<chalineb<<std::endl;
         //std::string instance_id = extractWord(chalineb, startChar, endChar, startCombinator, endCombinator);
@@ -267,6 +592,11 @@ void searchInGzipFile(const string &gzFileName, const string &searchString1, con
 
     gzclose(file);
 }
+
+
+
+
+
 
 void searchInFolder(const string &folderPath, const string &searchString1, const string &searchString2)
 {
