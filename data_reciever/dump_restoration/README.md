@@ -1,1 +1,1 @@
-g++ -std=c++17 -o openmrs_dump_restoration -I/usr/local/include/mysql -L/usr/local/lib -lmysqlclient -lz openmrs_dump_restoration.cpp
+g++ -std=c++17 -o openmrs_dump_restoration -I/usr/local/include/mysql -L/usr/local/lib -lmysqlclient -lz -I/usr/local/opt/libarchive/include -L/usr/local/opt/libarchive/lib -larchive  openmrs_dump_restoration.cpp
