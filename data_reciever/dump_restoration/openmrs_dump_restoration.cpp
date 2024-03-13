@@ -923,7 +923,8 @@ void searchInBuffer(const string &searchString1, const string &searchString2, co
             //restoreMySQLDumpB(gzFileName, db_host, db_user, db_password, db_name);
 
             // Construct the command to restore the database from the SQL dump
-            std::string restoreCommand = "gunzip < " + gzFileName + " | mysql -u " + db_user + " -p" + db_password  + " -P" + db_port + " " + db_name;
+            std::string db_hostb = "0.0.0.0";
+            std::string restoreCommand = "gunzip < " + gzFileName + " | mysql -u " + db_user +" -h "+db_hostb+ " -p" + db_password  + " -P" + db_port + " " + db_name;
 
             // Execute the command
             int returnValue = system(restoreCommand.c_str());
