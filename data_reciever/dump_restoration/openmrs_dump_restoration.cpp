@@ -906,7 +906,7 @@ void searchInBuffer(const string &searchString1, const string &searchString2, co
         //std::string instance_id = extractWord(chalineb, startChar, endChar, startCombinator, endCombinator);
         if(new_sitename != "")
         {
-            std::string db_name = new_sitename + "_" + instance_id;
+            std::string db_name = "openmrs_"+instance_id+"_"+new_sitename;
             std::cout << "instance_name:" << db_name << std::endl;
             /*const char* gzippedDumpFile = gzFileName.c_str();
             const char* mysqlHost = db_host.c_str();
@@ -924,6 +924,33 @@ void searchInBuffer(const string &searchString1, const string &searchString2, co
 
             // Construct the command to restore the database from the SQL dump
             std::string db_hostb = "0.0.0.0";
+            MYSQL *conn;
+            conn = mysql_init(NULL);
+
+            /*if (!mysql_real_connect(conn, db_hostb.c_str(), db_user.c_str(), db_password.c_str(), NULL, db_port, NULL, 0)) {
+
+                std::cerr << "Failed to connect to MySQL server: " << mysql_error(conn) << std::endl;
+                return;
+            }*/
+
+            // Check if the database exists
+            if (mysql_select_db(conn, db_name.c_str()) != 0) {
+                // Database does not exist, create it
+                if (mysql_query(conn, ("CREATE DATABASE " + db_name).c_str()) != 0) {
+                    std::cerr << "Failed to create database: " << mysql_error(conn) << std::endl;
+                    mysql_close(conn);
+                    return;
+                } else {
+                    std::cout << "Database created: " << db_name << std::endl;
+                }
+            }
+
+            // Close the connection
+            mysql_close(conn);
+
+            // Reconnect to the MySQL server and connect to the database
+            //conn = mysql_init(NULL);
+
             std::string restoreCommand = "gunzip < " + gzFileName + " | mysql -u " + db_user +" -h "+db_hostb+ " -p" + db_password  + " -P" + db_port + " " + db_name;
 
             // Execute the command
@@ -998,7 +1025,7 @@ void searchInFolder(const string &folderPath, const string &searchString1, const
 {
     for (const auto &entry : fs::directory_iterator(folderPath))
     {
-        if (entry.is_regular_file() && entry.path().extension() == ".gz")
+        if (fs::is_regular_file(entry.path()) && entry.path().extension() == ".gz")
         {
             cout << "Searching in file: " << entry.path() << endl;
             searchComplete = false;
