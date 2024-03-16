@@ -927,11 +927,11 @@ void searchInBuffer(const string &searchString1, const string &searchString2, co
             MYSQL *conn;
             conn = mysql_init(NULL);
 
-            /*if (!mysql_real_connect(conn, db_hostb.c_str(), db_user.c_str(), db_password.c_str(), NULL, db_port, NULL, 0)) {
+            if (!mysql_real_connect(conn, db_hostb.c_str(), db_user.c_str(), db_password.c_str(), NULL, std::stoi(db_port), NULL, 0)) {
 
                 std::cerr << "Failed to connect to MySQL server: " << mysql_error(conn) << std::endl;
                 return;
-            }*/
+            }
 
             // Check if the database exists
             if (mysql_select_db(conn, db_name.c_str()) != 0) {
@@ -947,6 +947,9 @@ void searchInBuffer(const string &searchString1, const string &searchString2, co
 
             // Close the connection
             mysql_close(conn);
+
+
+            std::cout << "start loading data......... " << std::endl;
 
             // Reconnect to the MySQL server and connect to the database
             //conn = mysql_init(NULL);
